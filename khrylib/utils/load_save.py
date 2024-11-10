@@ -18,6 +18,8 @@ def get_file_path(file_path):
         file_path = os.path.join('/home/zhengyu/workspace/urban_planning', file_path)
     elif hostname == 'DL4':
         file_path = os.path.join('/data2/zhengyu/workspace/urban_planning', file_path)
+    elif hostname == 'pranav':
+        file_path = os.path.join(cwd, file_path)
     else:
         raise ValueError('Unknown hostname: {}'.format(socket.gethostname()))
     return file_path
