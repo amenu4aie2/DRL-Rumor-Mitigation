@@ -3,6 +3,8 @@ import pickle, json
 import time
 from tqdm import tqdm
 import torch
+import platform
+from typing import Union, Text
 
 from khrylib.utils import *
 from khrylib.utils.torch import *
@@ -15,13 +17,15 @@ from news.models.baseline import RandomPolicy, GreedyPolicy, NullModel
 from news.utils.tools import TrajBatchDisc
 from news.utils.config import Config
 
+if platform.system() != "Linux":
+    from multiprocessing import set_start_method
+    set_start_method("spawn")
 
 def tensorfy(np_list, device=torch.device('cpu')):
     if isinstance(np_list[0], list):
         return [[torch.tensor(x).to(device) for x in y] for y in np_list]
     else:
         return [torch.tensor(y).to(device) for y in np_list]
-
 
 class NewsExpansionAgent(AgentPPO):
 
@@ -37,6 +41,7 @@ class NewsExpansionAgent(AgentPPO):
         self.training = training
         self.device = device
         self.loss_iter = 0
+        self.tf_objects = None  # Add storage for TF objects
         self.setup_logger(num_threads)
         self.setup_env()
         self.setup_model()
@@ -65,7 +70,40 @@ class NewsExpansionAgent(AgentPPO):
                                            (self.value_net.parameters(), 1)],
                          mini_batch_size=cfg.mini_batch_size)
 
+    def __getstate__(self):
+        """Custom state retrieval for pickling."""
+        state = self.__dict__.copy()
+        # Remove unpicklable objects
+        if 'tf_objects' in state:
+            del state['tf_objects']
+        # Handle torch models
+        state['policy_net_state'] = self.policy_net.state_dict() if hasattr(self.policy_net, 'state_dict') else None
+        state['value_net_state'] = self.value_net.state_dict() if hasattr(self.value_net, 'state_dict') else None
+        del state['policy_net']
+        del state['value_net']
+        return state
+
+    def __setstate__(self, state):
+        """Custom state restoration for unpickling."""
+        # Restore torch models
+        policy_net_state = state.pop('policy_net_state')
+        value_net_state = state.pop('value_net_state')
+        self.__dict__.update(state)
+        self.setup_model()  # Recreate models
+        if policy_net_state is not None:
+            self.policy_net.load_state_dict(policy_net_state)
+        if value_net_state is not None:
+            self.value_net.load_state_dict(value_net_state)
+        self.tf_objects = None
+
+    def initialize_tf(self):
+        """Initialize TensorFlow objects lazily."""
+        if self.tf_objects is None:
+            pass
+
     def sample_worker(self, pid, queue, num_samples, mean_action):
+        # Initialize TF objects in worker process
+        self.initialize_tf()
         self.seed_worker(pid)
         memory = Memory()
         logger = self.logger_cls(**self.logger_kwargs)
@@ -81,7 +119,6 @@ class NewsExpansionAgent(AgentPPO):
                 state_var = tensorfy([state])
                 use_mean_action = mean_action or torch.bernoulli(
                     torch.tensor([1 - self.noise_rate])).item()
-                # action = self.policy_net.select_action(state_var, use_mean_action).numpy().squeeze(0)
                 action = self.policy_net.select_action(
                     state_var, use_mean_action).numpy().squeeze(0)
 
@@ -109,14 +146,55 @@ class NewsExpansionAgent(AgentPPO):
                     logger.step(self.env, *logger_messages[var])
                     self.push_memory(memory, *memory_messages[var])
                 logger.end_episode(last_info)
-            #     self.thread_loggers[pid].info(
-            #         'worker {} finished episode {}.'.format(
-            #             pid, logger.num_episodes))
-            # else:
-            #     self.thread_loggers[pid].info(
-            #         '[!]worker {} failed episode {}.'.format(
-            #             pid, logger.num_episodes))
 
+        if queue is not None:
+            queue.put([pid, memory, logger])
+        else:
+            return memory, logger
+
+    def sample(self, num_samples, mean_action=False, nthreads=None):
+        if nthreads is None:
+            nthreads = self.num_threads
+            
+        t_start = time.time()
+        to_test(*self.sample_modules)
+        
+        # Use get_context to ensure proper multiprocessing context
+        ctx = multiprocessing.get_context('spawn' if platform.system() != "Linux" else None)
+        
+        with to_cpu(*self.sample_modules):
+            with torch.no_grad():
+                thread_num_samples = int(math.floor(num_samples / nthreads))
+                queue = ctx.Queue()
+                memories = [None] * nthreads
+                loggers = [None] * nthreads
+                
+                # Start worker processes
+                workers = []
+                for i in range(nthreads-1):
+                    worker_args = (i+1, queue, thread_num_samples, mean_action)
+                    worker = ctx.Process(target=self.sample_worker, args=worker_args)
+                    worker.start()
+                    workers.append(worker)
+                    
+                # Run first worker in main process
+                memories[0], loggers[0] = self.sample_worker(0, None, thread_num_samples, mean_action)
+
+                # Collect results from other workers
+                for i in range(nthreads - 1):
+                    pid, worker_memory, worker_logger = queue.get()
+                    memories[pid] = worker_memory
+                    loggers[pid] = worker_logger
+                
+                # Wait for all workers to finish
+                for worker in workers:
+                    worker.join()
+                    
+                traj_batch = self.traj_cls(memories)
+                logger = self.logger_cls.merge(loggers, **self.logger_kwargs)
+
+        logger.sample_time = time.time() - t_start
+        return traj_batch, logger
         if queue is not None:
             queue.put([pid, memory, logger])
         else:

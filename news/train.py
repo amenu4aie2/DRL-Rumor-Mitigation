@@ -31,7 +31,11 @@ flags.DEFINE_bool('restore_best_rewards', True, 'Whether to restore the best rew
                                                 'True for resume training. False for finetune with new reward.')
 
 FLAGS = flags.FLAGS
+import platform
 
+if platform.system() != "Linux":
+    from multiprocessing import set_start_method
+    set_start_method("spawn", force=True)
 
 def train_one_iteration(agent, iteration: int) -> None:
     """Train one iteration"""

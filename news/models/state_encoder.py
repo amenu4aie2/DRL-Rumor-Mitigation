@@ -2,8 +2,31 @@ import torch
 import torch.nn as nn
 import math
 
-class RLStateEncoder(nn.Module):
+class BaseStateEncoder(nn.Module):
+    """Base class for all state encoders."""
+    
+    def __init__(self):
+        super().__init__()
+        self.tf_objects = None
+        
+    def __getstate__(self):
+        """Custom state retrieval for pickling."""
+        state = self.__dict__.copy()
+        if 'tf_objects' in state:
+            del state['tf_objects']
+        return state
 
+    def __setstate__(self, state):
+        """Custom state restoration for unpickling."""
+        self.__dict__.update(state)
+        self.tf_objects = None
+        
+    def initialize_tf(self):
+        """Initialize TensorFlow objects lazily."""
+        if self.tf_objects is None:
+            pass
+
+class RLStateEncoder(BaseStateEncoder):
     EPSILON = 1e-6
 
     def __init__(self, cfg, agent):
@@ -19,12 +42,13 @@ class RLStateEncoder(nn.Module):
 
         self.attention_layer1 = nn.MultiheadAttention(cfg['gcn_node_dim'], cfg['num_attention_heads'])
         self.attention_query_layer1 = nn.Linear(cfg['gcn_node_dim'],cfg['gcn_node_dim'])
-        self.attention_key_layer1 = nn.Linear(cfg['gcn_node_dim'],cfg['gcn_node_dim'])
+        self.attention_key_layer1 = nn.Linear(cfg['gcn_node_dim'],cfg['gcn_node_dim']) 
         self.attention_value_layer1 = nn.Linear(cfg['gcn_node_dim'],cfg['gcn_node_dim'])
 
         self.output_policy_road_size = cfg['gcn_node_dim']
         self.output_value_size = cfg['gcn_node_dim'] + cfg['state_encoder_hidden_size'][-1] + 2
 
+    # Rest of the RLStateEncoder implementation remains the same...
     def create_numerical_feature_encoder(self, cfg):
         """Create the numerical feature encoder."""
         feature_encoder = nn.Sequential()
@@ -109,10 +133,7 @@ class RLStateEncoder(nn.Module):
 
         return state_policy, state_value, mask, stage
 
-class GNN1StateEncoder(nn.Module):
-    """
-    New GNN state encoder network.
-    """
+class GNN1StateEncoder(BaseStateEncoder):
     EPSILON = 1e-6
 
     def __init__(self, cfg, agent):
@@ -338,10 +359,7 @@ class GNN1StateEncoder(nn.Module):
         return state_policy, state_value, mask, stage
 
 
-class GNN2StateEncoder(nn.Module):
-    """
-    New GNN state encoder network.
-    """
+class GNN2StateEncoder(BaseStateEncoder):
     EPSILON = 1e-6
 
     def __init__(self, cfg, agent):
@@ -528,15 +546,12 @@ class GNN2StateEncoder(nn.Module):
         return state_policy, state_value, edge_mask, stage
 
 
-class GNN3StateEncoder(nn.Module):
-    """
-    New GNN state encoder network.
-    """
+class GNN3StateEncoder(BaseStateEncoder):
     EPSILON = 1e-6
 
     def __init__(self, cfg, agent):
         super().__init__()
-        self.cfg = cfg
+        self.cfg = cfg  
         self.agent = agent
         self.numerical_feature_encoder = self.create_numerical_feature_encoder(cfg)
         self.node_encoder = self.create_node_encoder(cfg,agent)
